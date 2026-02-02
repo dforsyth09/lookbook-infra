@@ -1,0 +1,22 @@
+# CDK
+cdk/node_modules/
+cdk/cdk.out/
+cdk/*.js
+cdk/*.d.ts
+
+# Lambda layer (built artifacts)
+lambda/layer/python/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+#supabase
+supabase_schema.sql
