@@ -80,8 +80,8 @@ export class LookbookInfraStack extends cdk.Stack {
         path.join(__dirname, '../../lambda/src')
       ),
       layers: [depsLayer],
-      memorySize: 512,
-      timeout: cdk.Duration.minutes(5),
+      memorySize: 1024,
+      timeout: cdk.Duration.minutes(10),
       environment: {
         S3_BUCKET: imageBucket.bucketName,
         CLOUDFRONT_DOMAIN: distribution.distributionDomainName,

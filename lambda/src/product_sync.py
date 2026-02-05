@@ -34,9 +34,15 @@ CATEGORY_KEYWORDS = {
 ASOS_CATEGORY_MAP = {
     "dresses": 8799,
     "tops": 4169,
-    "pants": 4208,
     "shoes": 6461,
+    "accessories": 27109,
+    "sweaters": 2637,
+    "blouses": 15199,
+    "plus-size": 9577,
 }
+
+# Words to filter out from product titles
+BLOCKED_WORDS = ["bra", "jean"]
 
 
 def get_secrets():
@@ -45,7 +51,9 @@ def get_secrets():
 
 
 def get_supabase(secrets):
-    return create_client(secrets["SUPABASE_URL"], secrets["SUPABASE_SERVICE_KEY"])
+    url = secrets["SUPABASE_URL"].strip()
+    key = secrets["SUPABASE_SERVICE_KEY"].strip()
+    return create_client(url, key)
 
 
 def item_exists(supabase, source, source_id):
@@ -93,6 +101,17 @@ def generate_price():
     return round(random.uniform(15.00, 49.99), 2)
 
 
+def ensure_https(url):
+    """Ensure URL has https:// scheme."""
+    if not url:
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+    if not url.startswith("http"):
+        return f"https://{url}"
+    return url
+
+
 # ============================================================
 # Amazon PA-API
 # ============================================================
@@ -106,6 +125,7 @@ def fetch_amazon_products(secrets):
         credential_secret=secrets["AMAZON_SECRET_KEY"],
         tag=secrets["AMAZON_PARTNER_TAG"],
         country=Country.US,
+        version="2.2",
     )
 
     products = []
@@ -161,59 +181,94 @@ def fetch_amazon_products(secrets):
 # ============================================================
 
 def fetch_asos_products(secrets):
-    """Fetch products from ASOS via RapidAPI."""
+    """Fetch products from ASOS via RapidAPI with pagination."""
     headers = {
         "X-RapidAPI-Key": secrets["RAPIDAPI_KEY"],
         "X-RapidAPI-Host": "asos2.p.rapidapi.com",
     }
 
+    # Pagination settings: 3 pages × 48 items × 4 categories = 576 items max
+    # Uses 12 API calls per run (stays within 500/month free tier if run daily)
+    ITEMS_PER_PAGE = 48
+    PAGES_PER_CATEGORY = 3
+
     products = []
     for category, cat_id in ASOS_CATEGORY_MAP.items():
-        try:
-            resp = requests.get(
-                "https://asos2.p.rapidapi.com/products/v2/list",
-                headers=headers,
-                params={
-                    "store": "US",
-                    "offset": "0",
-                    "categoryId": str(cat_id),
-                    "limit": "20",
-                    "country": "US",
-                    "currency": "USD",
-                    "sizeSchema": "US",
-                    "lang": "en-US",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            for item in data.get("products", []):
-                product_id = str(item.get("id", ""))
-                name = item.get("name", "")
-                price_current = item.get("price", {}).get("current", {}).get("value")
-                image_url = item.get("imageUrl", "")
-
-                if not name or not image_url:
-                    continue
-
-                # ASOS image URLs need https: prefix
-                if image_url.startswith("//"):
-                    image_url = "https:" + image_url
-
-                products.append(
-                    {
-                        "source": "asos",
-                        "source_id": product_id,
-                        "title": name,
-                        "original_image_url": image_url,
-                        "price": float(price_current) if price_current else generate_price(),
-                        "category": category,
-                        "brand": item.get("brandName"),
-                    }
+        for page in range(PAGES_PER_CATEGORY):
+            try:
+                offset = page * ITEMS_PER_PAGE
+                resp = requests.get(
+                    "https://asos2.p.rapidapi.com/products/v2/list",
+                    headers=headers,
+                    params={
+                        "store": "US",
+                        "offset": str(offset),
+                        "categoryId": str(cat_id),
+                        "limit": str(ITEMS_PER_PAGE),
+                        "country": "US",
+                        "currency": "USD",
+                        "sizeSchema": "US",
+                        "lang": "en-US",
+                    },
+                    timeout=15,
                 )
-        except Exception as e:
-            print(f"ASOS fetch error for category {category}: {e}")
+                resp.raise_for_status()
+                data = resp.json()
+
+                page_products = data.get("products", [])
+                print(f"Fetched {len(page_products)} items for {category} (page {page + 1})")
+
+                # Stop paginating if no more products
+                if not page_products:
+                    break
+
+                for item in page_products:
+                    product_id = str(item.get("id", ""))
+                    name = item.get("name", "")
+                    price_current = item.get("price", {}).get("current", {}).get("value")
+                    image_url = item.get("imageUrl", "")
+                    colour = item.get("colour")
+                    is_on_sale = item.get("price", {}).get("isMarkedDown", False)
+                    is_selling_fast = item.get("isSellingFast", False)
+
+                    # Get additional image URLs and ensure they have https://
+                    additional_urls = item.get("additionalImageUrls", [])
+                    additional_urls = [ensure_https(url) for url in additional_urls]
+
+                    if not name or not image_url:
+                        continue
+
+                    # Filter out blocked words (bra, jean, etc.)
+                    name_lower = name.lower()
+                    if any(word in name_lower for word in BLOCKED_WORDS):
+                        continue
+
+                    # Ensure main image URL has https://
+                    image_url = ensure_https(image_url)
+
+                    # Build the source URL for potential purchase
+                    product_url = item.get("url", "")
+                    if product_url and not product_url.startswith("http"):
+                        product_url = f"https://www.asos.com/{product_url}"
+
+                    products.append(
+                        {
+                            "source": "asos",
+                            "source_id": product_id,
+                            "title": name,
+                            "original_image_url": image_url,
+                            "additional_image_urls": additional_urls,
+                            "price": float(price_current) if price_current else generate_price(),
+                            "category": category,
+                            "brand": item.get("brandName"),
+                            "colour": colour,
+                            "is_on_sale": is_on_sale,
+                            "is_selling_fast": is_selling_fast,
+                            "source_url": product_url,
+                        }
+                    )
+            except Exception as e:
+                print(f"ASOS fetch error for {category} page {page + 1}: {e}")
 
     return products
 
@@ -230,14 +285,8 @@ def handler(event, context):
     items_added = 0
     errors = []
 
-    # Fetch from both sources
+    # Fetch from ASOS only (Amazon API requires qualifying sales)
     all_products = []
-    try:
-        all_products.extend(fetch_amazon_products(secrets))
-    except Exception as e:
-        errors.append({"source": "amazon", "error": str(e)})
-        print(f"Amazon fetch failed entirely: {e}")
-
     try:
         all_products.extend(fetch_asos_products(secrets))
     except Exception as e:
@@ -245,46 +294,54 @@ def handler(event, context):
         print(f"ASOS fetch failed entirely: {e}")
 
     items_fetched = len(all_products)
+    print(f"Total products fetched: {items_fetched}")
 
-    # Process each product
+    # Get existing product source_ids to skip duplicates (batch check)
+    existing_ids = set()
+    try:
+        result = supabase.table("clothing_items").select("source_id").eq("source", "asos").execute()
+        existing_ids = {row["source_id"] for row in result.data}
+        print(f"Found {len(existing_ids)} existing products to skip")
+    except Exception as e:
+        print(f"Warning: Could not fetch existing IDs: {e}")
+
+    # Filter out duplicates and prepare batch
+    new_products = []
     for product in all_products:
+        if product["source_id"] in existing_ids:
+            continue
+
+        # Use ASOS CDN URLs directly (skip S3 caching for speed)
+        new_products.append({
+            "id": str(uuid.uuid4()),
+            "source": product["source"],
+            "source_id": product["source_id"],
+            "title": product["title"],
+            "image_url": product["original_image_url"],  # Use ASOS URL directly
+            "original_image_url": product["original_image_url"],
+            "additional_image_urls": product.get("additional_image_urls", []),
+            "price": product["price"],
+            "category": product["category"],
+            "brand": product.get("brand"),
+            "colour": product.get("colour"),
+            "is_on_sale": product.get("is_on_sale", False),
+            "source_url": product.get("source_url"),
+            "is_active": True,
+        })
+
+    print(f"New products to insert: {len(new_products)}")
+
+    # Batch insert in chunks of 50
+    BATCH_SIZE = 50
+    for i in range(0, len(new_products), BATCH_SIZE):
+        batch = new_products[i:i + BATCH_SIZE]
         try:
-            if item_exists(supabase, product["source"], product["source_id"]):
-                continue
-
-            cdn_url = cache_image_to_s3(
-                product["original_image_url"],
-                product["source"],
-                product["source_id"],
-            )
-            if not cdn_url:
-                continue
-
-            insert_item(
-                supabase,
-                {
-                    "id": str(uuid.uuid4()),
-                    "source": product["source"],
-                    "source_id": product["source_id"],
-                    "title": product["title"],
-                    "image_url": cdn_url,
-                    "original_image_url": product["original_image_url"],
-                    "price": product["price"],
-                    "category": product["category"],
-                    "brand": product.get("brand"),
-                    "is_active": True,
-                },
-            )
-            items_added += 1
+            supabase.table("clothing_items").insert(batch).execute()
+            items_added += len(batch)
+            print(f"Inserted batch {i // BATCH_SIZE + 1}: {len(batch)} items")
         except Exception as e:
-            errors.append(
-                {
-                    "source": product["source"],
-                    "source_id": product["source_id"],
-                    "error": str(e),
-                }
-            )
-            print(f"Error processing {product['source']}/{product['source_id']}: {e}")
+            errors.append({"batch": i // BATCH_SIZE + 1, "error": str(e)})
+            print(f"Error inserting batch {i // BATCH_SIZE + 1}: {e}")
 
     # Log the sync run
     try:

@@ -44,7 +44,10 @@ lookbook-infra/
 │   │   └── cleanup.py                   # Deactivate old items, delete S3 objects
 │   ├── layer/
 │   │   └── requirements.txt             # Python dependencies for Lambda layer
-│   └── build_layer.sh                   # Builds the Lambda layer locally
+│   ├── build_layer.sh                   # Builds the Lambda layer locally
+│   └── test_apis.py                     # Local API testing script
+├── supabase_migration_v2.sql            # Migration for user accounts + new fields
+├── ios_updates_plan.md                  # Plan for iOS app changes
 └── README.md
 ```
 
@@ -59,35 +62,22 @@ lookbook-infra/
 
 ## Database Setup
 
-Run the following SQL in your Supabase SQL Editor before deploying:
+### Initial Setup (New Project)
 
-```sql
-CREATE TABLE IF NOT EXISTS clothing_items (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    image_url TEXT NOT NULL,
-    original_image_url TEXT,
-    price NUMERIC(10,2) NOT NULL,
-    category TEXT NOT NULL,
-    brand TEXT,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(source, source_id)
-);
+If starting fresh, run `supabase_migration_v2.sql` in its entirety.
 
-CREATE INDEX idx_clothing_active_category ON clothing_items (is_active, category);
+### Migration (Existing Tables)
 
-CREATE TABLE IF NOT EXISTS sync_log (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source TEXT NOT NULL,
-    items_fetched INTEGER,
-    items_added INTEGER,
-    errors JSONB,
-    ran_at TIMESTAMPTZ DEFAULT now()
-);
-```
+If you already have `clothing_items` and `sync_log` tables, run **only** `supabase_migration_v2.sql` which will:
+- Add new columns to `clothing_items` (colour, is_on_sale, additional_image_urls, source_url)
+- Create `users` table (for device-based auth)
+- Create `cart_items` table (synced cart for admin visibility)
+- Create `wishlist_items` table
+- Create `admin_cart_view` (helper view for admin dashboard)
+- Set up Row Level Security policies
+- Create `link_admin_to_user()` helper function
+
+See `supabase_migration_v2.sql` for full schema.
 
 ## Deploy
 
@@ -142,3 +132,25 @@ After credentials are set, test the sync Lambda manually:
 | CloudFront | ~$0.10 (single-user traffic) |
 | Secrets Manager | ~$1.60 (4 secrets) |
 | **Total** | **~$2/month** |
+
+## Admin/User Account Linking
+
+The app supports linked accounts so you (admin) can see your mother-in-law's cart and purchase items for her.
+
+### How It Works
+
+1. Both devices run the app, which auto-generates a unique device ID
+2. You link your device as "admin" to her device via SQL
+3. Your app shows an Admin tab where you can see her cart with real ASOS URLs
+
+### Setup Steps
+
+1. On **her phone**: 10-tap the app logo to reveal her device ID, copy it
+2. On **your phone**: Same gesture, copy your device ID
+3. Run in Supabase SQL Editor:
+   ```sql
+   SELECT link_admin_to_user('YOUR-DEVICE-ID', 'HER-DEVICE-ID');
+   ```
+4. Restart your app — Admin tab appears with her cart
+
+See `ios_updates_plan.md` for full iOS implementation details.
